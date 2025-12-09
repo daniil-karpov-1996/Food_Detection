@@ -91,17 +91,32 @@ def classify_bytes(model: YOLO, image_bytes: bytes, imgsz: int = 224, topk: int 
 
 def build_result_message(request_payload: dict, infer: dict):
     cls = infer["top1"]["class_name"]
+    score = infer["top1"]["score"]
+
+    # Если модель не уверена в предсказании
+    if score < 0.3:
+        msg = {
+            "top1_class": "",
+            "estimated_weight_g": 0
+        }
+        if "image_id" in request_payload:
+            msg["image_id"] = request_payload["image_id"]
+        return msg
+
+    # Стандартный сценарий (модель уверена)
     msg = {"top1_class": cls}
 
-    w = FOOD_AVG_WEIGHT_G.get(cls) + randint(0, int(FOOD_AVG_WEIGHT_G[cls] * 0.4) )
+    w = FOOD_AVG_WEIGHT_G.get(cls)
     if w is not None:
+        # случайная вариация веса (как у тебя было)
+        w = w + randint(0, int(w * 0.4))
         msg["estimated_weight_g"] = w
 
-    # прокидываем image_id, если он был в запросе (для кафки)
     if "image_id" in request_payload:
         msg["image_id"] = request_payload["image_id"]
 
     return msg
+
 
 
 def make_consumer(bootstrap: str, topic: str, group_id: str):
