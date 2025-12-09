@@ -1,135 +1,201 @@
-Food Detection Service (YOLOv11-cls + Kafka)
+# Food Detection Service (YOLOv11-cls + Kafka)
 
-Этот сервис классифицирует изображения еды с помощью модели YOLOv11-cls и оценивает примерный вес блюда по классу.
-Работает в Docker, поддерживает два режима:
+Сервис классифицирует изображения еды с помощью **YOLOv11-cls**  
+и вычисляет **примерный вес блюда по классу** (эвристика).
 
-Offline: локальная классификация файла
+Поддерживает два режима:
+1) **Offline-режим** — классификация локального файла  
+2) **Kafka-режим** — получение сообщения → классификация → публикация результата
 
-Kafka: прием изображений (base64, файл), классификация и отправка результата в топик Kafka
+Всё работает внутри Docker-контейнера.
 
-Python и внешние библиотеки на хосте не нужны — всё работает в контейнере!
+---
 
-0. Требования
+## 0. Требования
 
-Docker
- или совместимая среда
+Перед запуском убедитесь, что установлено:
 
-(Опционально) Docker Compose
- — для быстрого запуска Kafka
+- Docker / Docker Desktop  
+- (Опционально) Docker Compose — для Kafka  
+- Файл модели `best.pt` (YOLOv11-cls)
 
-Скачанный вес модели best.pt (размести рядом с изображениями)
+---
 
-1. Сборка Docker-образа с GitHub
+## 1. Сборка Docker-образа из GitHub
+
+```bash
 docker build -t food-detector:latest \
   https://github.com/daniil-karpov-1996/Food_Detection.git#main
+```
+## 2. Получение весов модели
 
-2. Получи модель и тестовый файл
+Файл модели YOLO: `best.pt`
 
-Скачай веса best.pt и положи их в папку с запуском
+Положите его в удобное место:
 
-Помести туда тестовую картинку, например test.jpg
+- **Linux/macOS:** `/home/user/best.pt`
+- **Windows:** `C:\best.pt`
 
-3. Проверь offline-режим (без Kafka)
+## 3. Проверка offline-режима (без Kafka)
+
+### Linux / macOS
+
+```bash
+docker run --rm \
+  -v $(pwd)/best.pt:/app/best.pt \
+  -v $(pwd)/test.jpg:/app/test.jpg \
+  food-detector:latest \
+  --weights /app/best.pt \
+  --offline-test \
+  --image-path /app/test.jpg
+```
+```json
+{
+  "top1_class": "steak",
+  "estimated_weight_g": 320,
+  "image_id": "offline_test"
+}
+```
+
+## 4. Быстрый запуск Kafka через Docker Compose
+
+Создайте файл `docker-compose.yml`:
+
+```yaml
+version: "3.8"
+
+services:
+  zookeeper:
+    image: bitnami/zookeeper:3.9
+    environment:
+      ALLOW_ANONYMOUS_LOGIN: "yes"
+    ports:
+      - "2181:2181"
+
+  kafka:
+    image: bitnami/kafka:3
+    environment:
+      KAFKA_CFG_ZOOKEEPER_CONNECT: zookeeper:2181
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+
+```
+Запуск Kafka:
+```bash
+docker compose up -d
+```
+Проверка работы:
+```bash
+docker compose ps
+```
+
+## 5. Создание Kafka-топиков
+
+### Войти в контейнер Kafka:
+
+```bash
+docker exec -it kafka bash
+```
+
+Создать входной топик:
+```bash
+kafka-topics.sh --create --topic food_images --bootstrap-server localhost:9092
+```
+
+Создать топик для результатов:
+```bash
+kafka-topics.sh --create --topic food_cls --bootstrap-server localhost:9092
+```
+
+Проверить список:
+```bash
+kafka-topics.sh --list --bootstrap-server localhost:9092
+```
+
+## 6. Отправка изображения в Kafka
+
+### Linux / macOS
+
+```bash
+base64 test.jpg \
+  | jq -Rs '{image_id:"test1", image_b64:.}' \
+  | kafka-console-producer.sh --topic food_images --bootstrap-server localhost:9092
+```
+## 7. Запуск сервиса в Kafka-режиме
+
+### Linux / macOS
+
+```bash
+docker run --rm --network host \
+  -v $(pwd)/best.pt:/app/best.pt \
+  food-detector:latest \
+  --weights /app/best.pt \
+  --bootstrap localhost:9092 \
+  --input-topic food_images \
+  --output-topic food_cls \
+  --group-id food-detector \
+  --debug
+```
+
+## 8. Получение результатов из Kafka
+
+```bash
+kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 \
+  --topic food_cls \
+  --from-beginning
+```
+
+Пример результата:
+```json
+{"image_id":"test1","top1_class":"steak","estimated_weight_g":320}
+```
+
+## 9. Полная шпаргалка команд
+
+```bash
+# Сборка контейнера
+docker build -t food-detector:latest https://github.com/daniil-karpov-1996/Food_Detection.git#main
+```
+# Offline тест
 docker run --rm -v best.pt:/app/best.pt -v test.jpg:/app/test.jpg \
   food-detector:latest --weights /app/best.pt --offline-test --image-path /app/test.jpg
 
-
-Результат: в консоли выведется top1_class и estimated_weight_g для изображения.
-
-4. Быстрый запуск Kafka (если нужно)
-
-Если у тебя нет работающего Kafka, подними его в Docker:
-
-git clone https://github.com/conduktor/kafka-stack-docker-compose
-cd kafka-stack-docker-compose
+# Запуск Kafka
 docker compose up -d
 
+# Создание топиков
+kafka-topics.sh --create --topic food_images --bootstrap-server localhost:9092
+kafka-topics.sh --create --topic food_cls --bootstrap-server localhost:9092
 
-По умолчанию Kafka будет доступна на localhost:9092.
-
-5. Создай топики
-
-Выполни в отдельном терминале (можно из контейнера Kafka):
-
-# Для передачи изображений в сервис
-docker exec -it <kafka_container_id> \
-  kafka-topics --create --topic food_images --bootstrap-server localhost:9092
-
-# Для получения результатов
-docker exec -it <kafka_container_id> \
-  kafka-topics --create --topic food_cls --bootstrap-server localhost:9092
-
-6. Запусти сервис в режиме Kafka
+# Запуск сервиса
 docker run --rm --network host \
-  -v best.pt:/app/best.pt food-detector:latest \
+  -v best.pt:/app/best.pt \
+  food-detector:latest \
   --weights /app/best.pt \
   --bootstrap localhost:9092 \
   --input-topic food_images \
   --output-topic food_cls \
   --group-id food-detector
 
-Параметры запуска
-Параметр	Описание
---weights	Путь до весов YOLOv11-cls (/app/best.pt)
---bootstrap	Адрес Kafka bootstrap (например, localhost:9092)
---input-topic	Топик Kafka для входящих изображений
---output-topic	Топик Kafka, куда отправляется результат
---group-id	(опционально) ID consumer group
---debug	(опционально) Выводит подробный лог отправляемых сообщений
---no-kafka	(опционально) Только консольный вывод, не использует Kafka
-7. Отправь изображение в сервис
+# Чтение результатов
+kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic food_cls --from-beginning
 
-Формат: base64 изображения или бинарный файл (в зависимости от настроек и клиента).
+## 10. Аргументы сервиса
 
-Пример отправки с помощью kafka-console-producer (см. документацию Kafka Tools
-):
-
-cat test.jpg | base64 | \
-  kafka-console-producer --topic food_images --bootstrap-server localhost:9092
-
-8. Получи результат из output topic
-kafka-console-consumer --topic food_cls --from-beginning --bootstrap-server localhost:9092
-
-
-Ответ:
-JSON с двумя ключами — top1_class (класс блюда) и estimated_weight_g (примерный вес).
-
-9. Пример типового сценария использования
-
-Собрать образ Docker с помощью команды выше.
-
-Скачать best.pt, поместить в папку с запуском.
-
-Проверить работу на локальном файле:
-
-docker run --rm -v best.pt:/app/best.pt -v test.jpg:/app/test.jpg \
-  food-detector:latest --weights /app/best.pt --offline-test --image-path /app/test.jpg
-
-
-Поднять Kafka:
-
-docker compose up -d
-
-
-Создать нужные топики (см. выше).
-
-Запустить сервис в Kafka-режиме:
-
-docker run --rm --network host -v best.pt:/app/best.pt food-detector:latest \
-  --weights /app/best.pt --bootstrap localhost:9092 \
-  --input-topic food_images --output-topic food_cls --group-id food-detector
-
-
-Отправить изображение через Kafka-продьюсер (см. пример выше).
-
-Принять результат через Kafka-консьюмер.
-
-10. Полезные параметры и расширения
-
---debug — включает расширенный лог вывода.
-
---no-kafka — отключает Kafka, результат только в консоль (удобно для теста).
-
-Можно менять имена топиков и параметры bootstrap под свою инфраструктуру.
-
-Для передачи файла напрямую смотри параметры/формат в документации Kafka-продьюсера.
+| Аргумент         | Описание |
+|------------------|----------|
+| `--weights PATH` | путь к весам YOLO |
+| `--offline-test` | запуск в режиме offline |
+| `--image-path`   | путь к изображению |
+| `--bootstrap`    | адрес Kafka (`host:port`) |
+| `--input-topic`  | топик для изображений |
+| `--output-topic` | топик для классификаций |
+| `--group-id`     | Kafka consumer group |
+| `--debug`        | включить подробный лог |
+| `--no-kafka`     | отключить Kafka, вывод в консоль |
